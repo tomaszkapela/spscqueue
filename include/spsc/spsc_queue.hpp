@@ -7,10 +7,13 @@
 #include <atomic>
 #include <concepts>
 #include <cstddef>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <new>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -87,6 +90,43 @@ public:
         return true;
     }
 
+    // Pushes elements of r until full, publishing them with one release store, and
+    // returns the first one not pushed. r's iterator operations must not throw
+    // either; that can't be checked, since few iterators declare them noexcept.
+    template <std::ranges::input_range R>
+        requires std::is_nothrow_constructible_v<T, std::ranges::range_reference_t<R>>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward): used as an lvalue, as in std::ranges.
+    [[nodiscard]] std::ranges::borrowed_iterator_t<R> try_push_range(R&& r) noexcept
+    {
+        auto first = std::ranges::begin(r);
+        const auto last = std::ranges::end(r);
+        const auto start = write_.load(std::memory_order_relaxed);
+        auto write = start;
+        for (; first != last; ++first)
+        {
+            const auto next_write = next(write);
+            if (next_write == cached_read_)
+            {
+                cached_read_ = read_.load(std::memory_order_acquire);
+                if (next_write == cached_read_)
+                {
+                    break;
+                }
+            }
+            std::construct_at(slots_[write].address(), *first);
+            write = next_write;
+        }
+        // write == start only if nothing was pushed: a whole lap doesn't fit.
+        if (write != start)
+        {
+            write_.store(write, std::memory_order_release);
+        }
+        return first;
+    }
+
+    // On the producer: at least this many pushes will succeed. Elsewhere, an estimate.
+    [[nodiscard]] std::size_t available_to_push() const noexcept { return capacity_ - occupied(); }
+
     [[nodiscard]] std::optional<T> try_pop() noexcept
     {
         std::optional<T> result;
@@ -107,6 +147,40 @@ public:
         // A single return, so that GCC applies NRVO.
         return result;
     }
+
+    // Calls f on up to max elements in their slots, in order, then frees them with
+    // one release store. Returns how many. f must not use this queue.
+    template <class F>
+        requires std::is_nothrow_invocable_v<F&, T&&>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward): called once per element.
+    std::size_t consume(F&& f, std::size_t max = std::numeric_limits<std::size_t>::max()) noexcept
+    {
+        auto read = read_.load(std::memory_order_relaxed);
+        std::size_t consumed = 0;
+        for (; consumed < max; ++consumed)
+        {
+            if (read == cached_write_)
+            {
+                cached_write_ = write_.load(std::memory_order_acquire);
+                if (read == cached_write_)
+                {
+                    break;
+                }
+            }
+            T* element = slots_[read].live();
+            std::invoke(f, std::move(*element)); // Exactly what the constraint checks.
+            std::destroy_at(element);
+            read = next(read);
+        }
+        if (consumed != 0)
+        {
+            read_.store(read, std::memory_order_release);
+        }
+        return consumed;
+    }
+
+    // On the consumer: at least this many pops will succeed. Elsewhere, an estimate.
+    [[nodiscard]] std::size_t available_to_pop() const noexcept { return occupied(); }
 
 private:
     static constexpr std::size_t cache_separation = std::hardware_destructive_interference_size;
@@ -147,6 +221,16 @@ private:
     [[nodiscard]] std::size_t next(std::size_t index) const noexcept
     {
         return (index == capacity_) ? 0 : (index + 1);
+    }
+
+    // Always in [0, capacity_]. On the producer or the consumer it errs only in the
+    // caller's favour: the other side's index may be stale, but coherence keeps it
+    // within a lap. Relaxed: no slot is accessed.
+    [[nodiscard]] std::size_t occupied() const noexcept
+    {
+        const auto read = read_.load(std::memory_order_relaxed);
+        const auto write = write_.load(std::memory_order_relaxed);
+        return (write >= read) ? (write - read) : (write + num_slots() - read);
     }
 
     // Immutable, read by both threads. capacity_ comes first: slots_ uses it.
