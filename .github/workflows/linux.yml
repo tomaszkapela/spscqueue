@@ -1,0 +1,48 @@
+name: Linux validation
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+      # Lets TSan disable ASLR, which Docker's default seccomp filter blocks.
+      options: --security-opt seccomp=unconfined
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        sanitizer: [none, address, thread]
+    steps:
+      - name: Install toolchain and GoogleTest
+        run: |
+          apt-get update -qq
+          apt-get install -y g++ clang cmake ninja-build libgtest-dev git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DSPSC_SANITIZER=${{ matrix.sanitizer }}
+      - run: cmake --build build -j 2
+      - run: ctest --test-dir build --output-on-failure -j 2
+
+  # Format check, then clang-tidy with warnings as errors.
+  lint:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install toolchain, linters and GoogleTest
+        run: |
+          apt-get update -qq
+          apt-get install -y clang clang-tidy clang-format cmake ninja-build libgtest-dev git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++
+          -DSPSC_CLANG_TIDY=ON
+      - run: cmake --build build --target format-check
+      - run: cmake --build build -j 2
