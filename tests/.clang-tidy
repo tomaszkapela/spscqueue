@@ -1,0 +1,13 @@
+# Test code breaks some rules on purpose: throwing or partial special members,
+# reference members, fixed seeds, T&& visitors and long test bodies. clang-tidy
+# 21 also misses optionals checked by ASSERT_TRUE.
+InheritParentConfig: true
+Checks: >
+  -bugprone-exception-escape,
+  -bugprone-random-generator-seed,
+  -bugprone-unchecked-optional-access,
+  -bugprone-unsafe-to-allow-exceptions,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-rvalue-reference-param-not-moved,
+  -cppcoreguidelines-special-member-functions,
+  -readability-function-cognitive-complexity
