@@ -16,6 +16,11 @@ endif()
 
 include(CTest)
 option(SPSC_WARNINGS_AS_ERRORS "Treat project test warnings as errors" ON)
+set(SPSC_SANITIZER "none" CACHE STRING "Test instrumentation: none, address, thread")
+set_property(CACHE SPSC_SANITIZER PROPERTY STRINGS none address thread)
+if(NOT SPSC_SANITIZER MATCHES "^(none|address|thread)$")
+  message(FATAL_ERROR "SPSC_SANITIZER must be none, address, or thread")
+endif()
 
 # clang-tidy on the tests and the header as they compile. The extra argument
 # hides GCC-only warning flags.
@@ -54,10 +59,19 @@ if(BUILD_TESTING)
     if(SPSC_CLANG_TIDY)
       set_target_properties(${target} PROPERTIES CXX_CLANG_TIDY "${spsc_clang_tidy}")
     endif()
+    if(SPSC_SANITIZER STREQUAL "address")
+      target_compile_options(${target} PRIVATE
+        -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+      target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    elseif(SPSC_SANITIZER STREQUAL "thread")
+      target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+      target_link_options(${target} PRIVATE -fsanitize=thread)
+    endif()
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES TIMEOUT 90)
   endfunction()
   spsc_test(spsc_core_tests tests/core_test.cpp tests/core_compile_time_test.cpp)
+  spsc_test(spsc_core_concurrency_tests tests/core_concurrency_test.cpp)
 endif()
 
 # `format` rewrites the sources; `format-check` fails on any deviation.
