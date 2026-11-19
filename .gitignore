@@ -1,0 +1,18 @@
+# CMake build trees, as the README creates them (build, build-asan, build-tidy, ...)
+/build*/
+/cmake-build-*/
+CMakeUserPresets.json
+
+# Compilation database and clangd's index
+/compile_commands.json
+/.cache/
+
+# Coverage output from -fprofile-instr-generate
+*.profraw
+*.profdata
+
+# Editors
+/.vscode/
+/.idea/
+*.swp
+*~
