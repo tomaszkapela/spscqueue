@@ -102,7 +102,7 @@ template <spsc::SlotLayout Layout>
 void check_partial_drain_and_refill(std::size_t capacity)
 {
     SCOPED_TRACE(test::layout_name(Layout));
-    spsc::SpscQueue<int, Layout> queue(capacity);
+    spsc::SpscQueue<int, std::allocator<int>, Layout> queue(capacity);
     int produced = 0;
     int consumed = 0;
     for (int round = 0; round < 20; ++round)
@@ -128,7 +128,7 @@ void check_against_deque_model(std::size_t capacity)
 {
     SCOPED_TRACE(test::layout_name(Layout));
     std::mt19937 random(0x51C52026);
-    spsc::SpscQueue<int, Layout> queue(capacity);
+    spsc::SpscQueue<int, std::allocator<int>, Layout> queue(capacity);
     std::deque<int> model;
     for (int step = 0; step < 20000; ++step)
     {
@@ -166,7 +166,7 @@ template <spsc::SlotLayout Layout>
 void check_over_aligned_storage()
 {
     SCOPED_TRACE(test::layout_name(Layout));
-    spsc::SpscQueue<Aligned, Layout> queue(3);
+    spsc::SpscQueue<Aligned, std::allocator<Aligned>, Layout> queue(3);
     for (int i = 0; i < 12; ++i)
     {
         ASSERT_TRUE(queue.try_emplace());
