@@ -70,7 +70,8 @@ if(BUILD_TESTING)
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES TIMEOUT 90)
   endfunction()
-  spsc_test(spsc_core_tests tests/core_test.cpp tests/core_compile_time_test.cpp)
+  spsc_test(spsc_core_tests tests/core_test.cpp tests/core_compile_time_test.cpp
+    tests/allocator_test.cpp)
   spsc_test(spsc_core_concurrency_tests tests/core_concurrency_test.cpp)
 endif()
 

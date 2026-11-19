@@ -1,7 +1,7 @@
 # SPSC queue
 
 A bounded, nonblocking, lock-free, header-only C++20 queue for exactly one
-producer thread and one consumer thread: `spsc::SpscQueue<T, Layout>`, in
+producer thread and one consumer thread: `spsc::SpscQueue<T, Allocator, Layout>`, in
 `<spsc/spsc_queue.hpp>`.
 
 The implementation uses only the standard library. GoogleTest is used by the
@@ -134,10 +134,22 @@ the queue before workers start, and destroy it only after every call has
 returned. The queue cannot be copied or moved.
 
 **Capacity.** Capacity is fixed at construction and equals the number of usable
-places. Zero throws `std::invalid_argument`. Storage holds N + 1 slots. A slot
-array larger than `PTRDIFF_MAX` bytes throws `std::length_error` before
+places. Zero throws `std::invalid_argument`. Storage holds N + 1 slots, rounded
+up to whole cache blocks. Storage larger than `PTRDIFF_MAX` bytes, or than the
+allocator's `max_size` (counted in blocks), throws `std::length_error` before
 allocation. Allocation failure throws `std::bad_alloc`. The queue allocates only
 in its constructor; element operations may allocate.
+
+**Allocators.** `Allocator` supplies the slot storage. The queue rebinds it to a
+cache-block-sized, cache-block-aligned type, so any allocator is accepted,
+whatever its `value_type`, but it must honour that alignment: storage that isn't
+aligned is returned and the constructor throws `std::bad_alloc`. The allocator
+is used only in the constructor and the destructor, never by the producer or the
+consumer. The queue keeps a copy of it, so whatever it refers to, such as a
+`std::pmr::memory_resource`, must outlive the queue. A stateless allocator takes
+no space. Fancy pointers work; the queue reaches the slots through
+`std::to_address`. Elements don't receive the allocator: a `std::pmr::string`
+keeps its own, so moving it in can't allocate.
 
 **Element types.** `T` must satisfy `spsc::queue_element`: a cv-unqualified,
 non-array object type with nonthrowing destruction and
@@ -179,11 +191,11 @@ aarch64, whose memory model allows reorderings that x86 never performs.
 
 ## API
 
-### `SpscQueue<T, Layout = SlotLayout::compact>`
+### `SpscQueue<T, Allocator = std::allocator<T>, Layout = SlotLayout::compact>`
 
 | Operation | Role | Result |
 | --- | --- | --- |
-| `SpscQueue(capacity)` | before workers start | Allocates N + 1 slots. |
+| `SpscQueue(capacity, allocator = Allocator())` | before workers start | Allocates N + 1 slots through `allocator`. |
 | `capacity()` | any | Usable places. |
 | `try_emplace(args...)` | producer | `bool`: `false` when observed full. |
 | `try_push(const T&)`, `try_push(T&&)` | producer | `bool`: `false` when observed full. |
@@ -253,7 +265,9 @@ shared without coherence traffic. `compact` slots use the element's natural
 alignment. `cache_isolated` slots are aligned and padded to the interference
 size, so adjacent elements never share a line. That costs memory and locality,
 so it is not always faster. Both layouts keep any stronger alignment the element
-type requires.
+type requires. The slot array itself starts on a cache block and is rounded up
+to whole blocks, so it shares no line with neighbouring allocations; that costs
+less than one block per queue.
 
 **Element lifetime.** Slots are raw `std::byte` storage, so the queue needs no
 default constructor and constructs nothing in empty slots. Elements start their

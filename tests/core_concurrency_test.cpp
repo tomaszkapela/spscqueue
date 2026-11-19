@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <latch>
+#include <memory>
 #include <span>
 #include <string>
 #include <thread>
@@ -27,7 +28,7 @@ template <spsc::SlotLayout Layout>
 void transfer_one_at_a_time(std::size_t capacity, bool slow_producer)
 {
     SCOPED_TRACE(test::layout_name(Layout));
-    spsc::SpscQueue<Packet, Layout> queue(capacity);
+    spsc::SpscQueue<Packet, std::allocator<Packet>, Layout> queue(capacity);
     std::atomic<bool> corrupted{false}; // Set by the consumer, to stop the producer.
     std::latch start(2);
     std::uint64_t received = 0;
@@ -116,7 +117,7 @@ template <spsc::SlotLayout Layout>
 void transfer_in_batches(std::size_t capacity)
 {
     SCOPED_TRACE(test::layout_name(Layout));
-    spsc::SpscQueue<Packet, Layout> queue(capacity);
+    spsc::SpscQueue<Packet, std::allocator<Packet>, Layout> queue(capacity);
     std::atomic<bool> failed{false}; // A wrong packet or a shortfall; stops both threads.
     std::latch start(2);
     std::uint64_t received = 0;

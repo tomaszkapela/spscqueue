@@ -7,6 +7,7 @@
 #include <atomic>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -34,13 +35,26 @@ concept queue_element = std::is_object_v<T> && (!std::is_array_v<T>) && // a sin
                         std::destructible<T> &&                         // removal can't throw...
                         std::is_nothrow_move_constructible_v<T>;        // ...on either step
 
-template <queue_element T, SlotLayout Layout = SlotLayout::compact>
+// Allocator supplies the slot storage. It is rebound to whole cache blocks and
+// used only in the constructor and destructor; elements don't use it.
+template <queue_element T, class Allocator = std::allocator<T>,
+          SlotLayout Layout = SlotLayout::compact>
 class SpscQueue
 {
 public:
-    explicit SpscQueue(std::size_t capacity)
-        : capacity_(checked_capacity(capacity)), slots_(new Slot[num_slots()])
+    explicit SpscQueue(std::size_t capacity, const Allocator& allocator = Allocator())
+        : allocator_(allocator), capacity_(checked_capacity(capacity, allocator_)),
+          blocks_(BlockTraits::allocate(allocator_, block_count()))
     {
+        void* const storage = std::to_address(blocks_);
+        // An allocator may silently ignore an over-alignment ([allocator.requirements]).
+        if ((reinterpret_cast<std::uintptr_t>(storage) % allocation_alignment) != 0)
+        {
+            BlockTraits::deallocate(allocator_, blocks_, block_count());
+            throw std::bad_alloc();
+        }
+        // Reuses the blocks' storage for the slots, which need no initialization.
+        ::new (storage) Slot[num_slots()];
     }
 
     SpscQueue(const SpscQueue&) = delete;
@@ -54,9 +68,10 @@ public:
         const auto write = write_.load(std::memory_order_relaxed);
         while (read != write)
         {
-            std::destroy_at(slots_[read].live());
+            std::destroy_at(slot(read).live());
             read = next(read);
         }
+        BlockTraits::deallocate(allocator_, blocks_, block_count());
     }
 
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
@@ -85,7 +100,7 @@ public:
                 return false;
             }
         }
-        std::construct_at(slots_[write].address(), std::forward<Args>(args)...);
+        std::construct_at(slot(write).address(), std::forward<Args>(args)...);
         write_.store(next_write, std::memory_order_release);
         return true;
     }
@@ -113,7 +128,7 @@ public:
                     break;
                 }
             }
-            std::construct_at(slots_[write].address(), *first);
+            std::construct_at(slot(write).address(), *first);
             write = next_write;
         }
         // write == start only if nothing was pushed: a whole lap doesn't fit.
@@ -138,7 +153,7 @@ public:
         }
         if (read != cached_write_)
         {
-            T* element = slots_[read].live();
+            T* element = slot(read).live();
             result.emplace(std::move(*element));
             std::destroy_at(element);
             // Releasing the index orders destruction before the producer reuses the slot.
@@ -167,7 +182,7 @@ public:
                     break;
                 }
             }
-            T* element = slots_[read].live();
+            T* element = slot(read).live();
             std::invoke(f, std::move(*element)); // Exactly what the constraint checks.
             std::destroy_at(element);
             read = next(read);
@@ -187,6 +202,9 @@ private:
     static constexpr std::size_t slot_alignment = (Layout == SlotLayout::cache_isolated)
                                                       ? std::max(alignof(T), cache_separation)
                                                       : alignof(T);
+    // The slot array starts and ends on a cache block, so it shares no line with
+    // neighbouring allocations.
+    static constexpr std::size_t allocation_alignment = std::max(cache_separation, slot_alignment);
 
     struct alignas(slot_alignment) Slot
     {
@@ -198,20 +216,46 @@ private:
         T* live() noexcept { return std::launder(address()); }
     };
 
-    static std::size_t checked_capacity(std::size_t capacity)
+    // The unit of allocation: one aligned cache block.
+    struct alignas(allocation_alignment) Block
+    {
+        std::byte bytes[allocation_alignment];
+    };
+    using BlockAllocator = std::allocator_traits<Allocator>::template rebind_alloc<Block>;
+    using BlockTraits = std::allocator_traits<BlockAllocator>;
+
+    // Whole blocks covering the slots, so the array shares no line with other data.
+    static constexpr std::size_t blocks_for(std::size_t slots) noexcept
+    {
+        return ((slots * sizeof(Slot)) + (sizeof(Block) - 1)) / sizeof(Block);
+    }
+
+    static std::size_t checked_capacity(std::size_t capacity, const BlockAllocator& allocator)
     {
         if (capacity == 0)
         {
             throw std::invalid_argument("SPSC capacity must be positive");
         }
-        // The slots must fit in PTRDIFF_MAX bytes, so that pointer differences work.
-        constexpr auto max_slots =
-            static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(Slot);
-        if (capacity >= max_slots)
+        // The blocks must fit in PTRDIFF_MAX bytes, so that pointer differences work,
+        // and in what the allocator can provide.
+        constexpr auto max_bytes =
+            static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max());
+        const auto max_blocks = std::min(
+            max_bytes / sizeof(Block), static_cast<std::size_t>(BlockTraits::max_size(allocator)));
+        // The first test keeps blocks_for from overflowing.
+        if ((capacity >= (max_bytes / sizeof(Slot))) || (blocks_for(capacity + 1) > max_blocks))
         {
             throw std::length_error("SPSC capacity is too large");
         }
         return capacity;
+    }
+
+    [[nodiscard]] std::size_t block_count() const noexcept { return blocks_for(num_slots()); }
+
+    // Recomputed on each access, so a fancy pointer (an offset) stays valid.
+    [[nodiscard]] Slot& slot(std::size_t index) const noexcept
+    {
+        return std::launder(reinterpret_cast<Slot*>(std::to_address(blocks_)))[index];
     }
 
     // One more than capacity_: the spare slot tells full from empty.
@@ -233,9 +277,12 @@ private:
         return (write >= read) ? (write - read) : (write + num_slots() - read);
     }
 
-    // Immutable, read by both threads. capacity_ comes first: slots_ uses it.
+    // In initialization order: checked_capacity uses allocator_, blocks_ uses
+    // capacity_. allocator_ is used only by the constructor and the destructor; the
+    // other two are immutable and read by both threads.
+    [[no_unique_address]] BlockAllocator allocator_;
     const std::size_t capacity_;
-    const std::unique_ptr<Slot[]> slots_;
+    const BlockTraits::pointer blocks_; // Block*, or a fancy pointer
 
     // Producer only, on its own cache line.
     alignas(cache_separation) std::atomic<std::size_t> write_{0};
