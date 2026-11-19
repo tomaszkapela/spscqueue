@@ -39,7 +39,7 @@ class SpscQueue
 {
 public:
     explicit SpscQueue(std::size_t capacity)
-        : capacity_(checked_capacity(capacity)), slots_(new Slot[num_slots()])
+        : capacity_(checked_capacity(capacity)), slots_(allocate_slots())
     {
     }
 
@@ -187,6 +187,9 @@ private:
     static constexpr std::size_t slot_alignment = (Layout == SlotLayout::cache_isolated)
                                                       ? std::max(alignof(T), cache_separation)
                                                       : alignof(T);
+    // The slot array starts and ends on a cache block, so it shares no line with
+    // neighbouring allocations.
+    static constexpr std::size_t allocation_alignment = std::max(cache_separation, slot_alignment);
 
     struct alignas(slot_alignment) Slot
     {
@@ -214,6 +217,30 @@ private:
         return capacity;
     }
 
+    // The slots' bytes, rounded up to whole cache blocks.
+    [[nodiscard]] std::size_t allocation_size() const noexcept
+    {
+        return ((num_slots() * sizeof(Slot)) + (allocation_alignment - 1)) &
+               ~(allocation_alignment - 1);
+    }
+
+    struct AlignedDeleter
+    {
+        void operator()(Slot* slots) const noexcept
+        {
+            ::operator delete(slots, std::align_val_t(allocation_alignment));
+        }
+    };
+
+    using SlotPointer = std::unique_ptr<Slot[], AlignedDeleter>;
+
+    // operator new creates the Slot array implicitly: Slot is an implicit-lifetime type.
+    [[nodiscard]] SlotPointer allocate_slots() const
+    {
+        return SlotPointer(static_cast<Slot*>(
+            ::operator new(allocation_size(), std::align_val_t(allocation_alignment))));
+    }
+
     // One more than capacity_: the spare slot tells full from empty.
     [[nodiscard]] std::size_t num_slots() const noexcept { return capacity_ + 1; }
 
@@ -235,7 +262,7 @@ private:
 
     // Immutable, read by both threads. capacity_ comes first: slots_ uses it.
     const std::size_t capacity_;
-    const std::unique_ptr<Slot[]> slots_;
+    const SlotPointer slots_;
 
     // Producer only, on its own cache line.
     alignas(cache_separation) std::atomic<std::size_t> write_{0};

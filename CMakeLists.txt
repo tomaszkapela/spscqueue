@@ -72,6 +72,11 @@ if(BUILD_TESTING)
   endfunction()
   spsc_test(spsc_core_tests tests/core_test.cpp tests/core_compile_time_test.cpp)
   spsc_test(spsc_core_concurrency_tests tests/core_concurrency_test.cpp)
+  # Replaces the global aligned operator new, which Clang's TSan runtime also
+  # defines. The test is single-threaded, so TSan adds nothing to it.
+  if(NOT SPSC_SANITIZER STREQUAL "thread")
+    spsc_test(spsc_allocation_tests tests/allocation_test.cpp)
+  endif()
 endif()
 
 # `format` rewrites the sources; `format-check` fails on any deviation.

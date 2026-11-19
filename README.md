@@ -134,10 +134,11 @@ the queue before workers start, and destroy it only after every call has
 returned. The queue cannot be copied or moved.
 
 **Capacity.** Capacity is fixed at construction and equals the number of usable
-places. Zero throws `std::invalid_argument`. Storage holds N + 1 slots. A slot
-array larger than `PTRDIFF_MAX` bytes throws `std::length_error` before
-allocation. Allocation failure throws `std::bad_alloc`. The queue allocates only
-in its constructor; element operations may allocate.
+places. Zero throws `std::invalid_argument`. Storage holds N + 1 slots, rounded
+up to whole cache blocks. A slot array larger than `PTRDIFF_MAX` bytes throws
+`std::length_error` before allocation. Allocation failure throws
+`std::bad_alloc`. The queue allocates only in its constructor; element
+operations may allocate.
 
 **Element types.** `T` must satisfy `spsc::queue_element`: a cv-unqualified,
 non-array object type with nonthrowing destruction and
@@ -253,7 +254,9 @@ shared without coherence traffic. `compact` slots use the element's natural
 alignment. `cache_isolated` slots are aligned and padded to the interference
 size, so adjacent elements never share a line. That costs memory and locality,
 so it is not always faster. Both layouts keep any stronger alignment the element
-type requires.
+type requires. The slot array itself starts on a cache block and is rounded up
+to whole blocks, so it shares no line with neighbouring allocations; that costs
+less than one block per queue.
 
 **Element lifetime.** Slots are raw `std::byte` storage, so the queue needs no
 default constructor and constructs nothing in empty slots. Elements start their
